@@ -1,0 +1,74 @@
+﻿<Window x:Class="Desktop_Firmware_Testing.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:Desktop_Firmware_Testing"
+        mc:Ignorable="d"
+        Title="Firmware Uploader" Height="450" Width="800"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Cổng COM + Baud -->
+        <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,12" VerticalAlignment="Center">
+            <TextBlock Text="Cổng:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbPorts" Width="160" Margin="0,0,8,0"/>
+            <Button Content="Làm mới" Width="90" Click="RefreshPorts_Click" Margin="0,0,16,0"/>
+            <TextBlock Text="Baud:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbBaud" Width="120" Margin="0,0,8,0">
+                <ComboBoxItem Content="115200" IsSelected="True"/>
+                <ComboBoxItem Content="921600"/>
+                <ComboBoxItem Content="460800"/>
+                <ComboBoxItem Content="230400"/>
+                <ComboBoxItem Content="57600"/>
+                <ComboBoxItem Content="38400"/>
+            </ComboBox>
+            <Button x:Name="BtnConnect" Content="Kết nối" Width="100" Click="BtnConnect_Click"/>
+            <TextBlock x:Name="TxtConnState" Margin="12,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Chọn file .bin -->
+        <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,12">
+            <TextBox x:Name="TxtFile" Width="520" IsReadOnly="True" Margin="0,0,8,0"/>
+            <Button x:Name="BtnPickBin" Content="Chọn .bin..." Width="120" Click="PickFile_Click"/>
+        </StackPanel>
+
+        <!-- Gửi -->
+        <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,12">
+            <Button x:Name="BtnSend" Content="Gửi firmware" Width="140" Click="BtnSend_Click" IsEnabled="False"/>
+            <Button x:Name="BtnCancel" Content="Huỷ" Width="100" Margin="8,0,0,0" Click="BtnCancel_Click" IsEnabled="False"/>
+            <ProgressBar x:Name="Prog" Height="20" Margin="16,0,0,0" VerticalAlignment="Center" Width="350"/>
+            <TextBlock x:Name="TxtProgress" Margin="8,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Log -->
+        <TextBlock Grid.Row="3" Grid.ColumnSpan="2" Text="Log:" Margin="0,0,0,6"/>
+        <TextBox Grid.Row="4" Grid.ColumnSpan="2" x:Name="TxtLog"
+                 IsReadOnly="True"
+                 AcceptsReturn="True"
+                 VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto"
+                 TextWrapping="NoWrap"/>
+
+        <!-- Giao thức tham chiếu -->
+        <Border Grid.Row="5" Grid.ColumnSpan="2" Padding="8" Margin="0,12,0,0" BorderBrush="#DDD" BorderThickness="1">
+            <TextBlock>
+                <Run Text="Khung: [0xAA,0x55, CMD, LEN_H, LEN_L, PAYLOAD..., CRC_H, CRC_L]  CRC16-CCITT over (CMD|LEN|PAYLOAD)"/><LineBreak/>
+                <Run Text="CMD: 0x01 START(size[4], file_crc16[2]), 0x02 DATA(seq[1], data...), 0x03 END(), 0x04 ABORT()"/><LineBreak/>
+                <Run Text="Thiết bị trả: ACK=0x06, NAK=0x15, CAN=0x18. Timeout 2s. Retry 5/block."/>
+            </TextBlock>
+        </Border>
+    </Grid>
+</Window>
