@@ -21,13 +21,13 @@
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
-        <!-- Cổng COM + Baud -->
+        <!-- Cổng COM + Baud + Địa chỉ tủ -->
         <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,12" VerticalAlignment="Center">
             <TextBlock Text="Cổng:" Margin="0,0,8,0" VerticalAlignment="Center"/>
             <ComboBox x:Name="CmbPorts" Width="160" Margin="0,0,8,0"/>
             <Button Content="Làm mới" Width="90" Click="RefreshPorts_Click" Margin="0,0,16,0"/>
             <TextBlock Text="Baud:" Margin="0,0,8,0" VerticalAlignment="Center"/>
-            <ComboBox x:Name="CmbBaud" Width="120" Margin="0,0,8,0">
+            <ComboBox x:Name="CmbBaud" Width="120" Margin="0,0,16,0">
                 <ComboBoxItem Content="115200" IsSelected="True"/>
                 <ComboBoxItem Content="921600"/>
                 <ComboBoxItem Content="460800"/>
@@ -35,6 +35,17 @@
                 <ComboBoxItem Content="57600"/>
                 <ComboBoxItem Content="38400"/>
             </ComboBox>
+
+            <TextBlock Text="Địa chỉ tủ:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbAddr" Width="80" Margin="0,0,16,0">
+                <ComboBoxItem Content="1" IsSelected="True"/>
+                <ComboBoxItem Content="2"/>
+                <ComboBoxItem Content="3"/>
+                <ComboBoxItem Content="4"/>
+                <ComboBoxItem Content="5"/>
+                <ComboBoxItem Content="6"/>
+            </ComboBox>
+
             <Button x:Name="BtnConnect" Content="Kết nối" Width="100" Click="BtnConnect_Click"/>
             <TextBlock x:Name="TxtConnState" Margin="12,0,0,0" VerticalAlignment="Center"/>
         </StackPanel>
@@ -62,12 +73,10 @@
                  HorizontalScrollBarVisibility="Auto"
                  TextWrapping="NoWrap"/>
 
-        <!-- Giao thức tham chiếu -->
+        <!-- Ghi chú -->
         <Border Grid.Row="5" Grid.ColumnSpan="2" Padding="8" Margin="0,12,0,0" BorderBrush="#DDD" BorderThickness="1">
             <TextBlock>
-                <Run Text="Khung: [0xAA,0x55, CMD, LEN_H, LEN_L, PAYLOAD..., CRC_H, CRC_L]  CRC16-CCITT over (CMD|LEN|PAYLOAD)"/><LineBreak/>
-                <Run Text="CMD: 0x01 START(size[4], file_crc16[2]), 0x02 DATA(seq[1], data...), 0x03 END(), 0x04 ABORT()"/><LineBreak/>
-                <Run Text="Thiết bị trả: ACK=0x06, NAK=0x15, CAN=0x18. Timeout 2s. Retry 5/block."/>
+                <Run Text="Khung EMC: ['E','M','C', CMD, len_L, len_H, payload..., cks]  cks=(CMD+lenL+lenH+sum(payload));"/>
             </TextBlock>
         </Border>
     </Grid>

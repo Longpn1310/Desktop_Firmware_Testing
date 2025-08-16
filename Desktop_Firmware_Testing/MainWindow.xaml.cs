@@ -110,16 +110,24 @@ namespace Desktop_Firmware_Testing
                 return;
             }
 
-            var filePath = TxtFile.Text; // chụp trên UI thread
+            var filePath = TxtFile.Text;
             if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
             {
                 MessageBox.Show("File không hợp lệ");
                 return;
             }
 
-            // cấu hình gửi
-            ushort chunk = 1024;       // đổi nếu cần
-            byte cabinetAddr = 1;      // 1..4. thêm ô nhập nếu muốn
+            // Lấy địa chỉ tủ từ ComboBox (1..6)
+            if (CmbAddr.SelectedItem is not ComboBoxItem addrItem ||
+                !byte.TryParse(addrItem.Content?.ToString(), out var cabinetAddr) ||
+                cabinetAddr < 1 || cabinetAddr > 6)
+            {
+                MessageBox.Show("Địa chỉ tủ không hợp lệ (1..6)");
+                return;
+            }
+
+            // Kích thước frame tối đa 512 theo giao thức
+            ushort chunk = 512;
 
             BtnSend.IsEnabled = false;
             BtnCancel.IsEnabled = true;
@@ -133,7 +141,7 @@ namespace Desktop_Firmware_Testing
                 maxRetries: 5,
                 ackTimeoutMs: 2000,
                 cabinetAddr: cabinetAddr,
-                loadAddress: 0 // không dùng với CMD 0xFC
+                loadAddress: 0 // 4 bytes, có thể thay đổi nếu cần
             );
 
             _sender.LogEmitted += (_, msg) => Dispatcher.Invoke(() => Log(msg));
