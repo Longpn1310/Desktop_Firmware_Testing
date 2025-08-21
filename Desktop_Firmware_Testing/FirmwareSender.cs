@@ -1,42 +1,40 @@
 ﻿using System;
 using System.IO;
-using System.IO.Ports;
 using System.Text;
 using System.Threading;
 
 namespace Desktop_Firmware_Testing
 {
-    // Khung EMC: ['E','M','C', CMD, len_L, len_H, payload..., cks]
+    // Khung: [H1,H2,H3, CMD, len_L, len_H, payload..., cks]
     // cks = (CMD + len_L + len_H + sum(payload)) & 0xFF
-    // 0xFB (INIT) payload 11B: [addr(1), loadAddr(4, LE), fwSize(4, LE), frameSize(2, LE)]
-    // 0xFB ACK: EMC 0xFC payload [addr, frameIdx(LE)] với frameIdx==0
-    // 0xFC (DATA) payload: [addr, data..., frameIdx(2, LE)]
-    // 0xFC ACK: EMC 0xFC payload [addr, frameIdx(LE)] khớp với frame đã gửi
+    // Firmware: CMD 0xFB (INIT), 0xFC (DATA). Header có thể EMC hoặc MCE.
+    // Ping/Pong: header 'M','C','E', cmd=0x04, payload [data, 0x01].
     public sealed class FirmwareSender
     {
-        private readonly SerialPort _port;
-        private readonly int _blockSize;          // <= 512
+        public enum FrameHeader { EMC, MCE }
+
+        private readonly IEmcTransport _io;
+        private readonly int _blockSize;     // <= 512
         private readonly int _maxRetries;
         private readonly int _ackTimeoutMs;
-        private readonly byte _cabinetAddr;       // 1..6
-        private readonly uint _loadAddress;       // theo yêu cầu: 4 bytes, thường 0
+        private readonly byte _cabinetAddr;  // 1..6
+        private readonly uint _loadAddress;  // 4 bytes
 
         public event EventHandler<string>? LogEmitted;
         public event EventHandler<ProgressInfo>? ProgressChanged;
-        public record struct ProgressInfo(double Percent, long SentBytes, long TotalBytes);
+        public readonly record struct ProgressInfo(double Percent, long SentBytes, long TotalBytes);
 
-        // Giữ tương thích code cũ: addr=1, loadAddress=0
-        public FirmwareSender(SerialPort port, int blockSize = 512, int maxRetries = 5, int ackTimeoutMs = 2000)
-            : this(port, blockSize, maxRetries, ackTimeoutMs, cabinetAddr: 1, loadAddress: 0) { }
+        // Giữ tương thích
+        public FirmwareSender(System.IO.Ports.SerialPort port, int blockSize = 512, int maxRetries = 5, int ackTimeoutMs = 2000)
+            : this(new SerialEmcTransport(port), blockSize, maxRetries, ackTimeoutMs, cabinetAddr: 1, loadAddress: 0) { }
 
-        public FirmwareSender(SerialPort port, int blockSize, int maxRetries, int ackTimeoutMs,
+        public FirmwareSender(IEmcTransport transport, int blockSize, int maxRetries, int ackTimeoutMs,
                               byte cabinetAddr, uint loadAddress)
         {
-            if (port == null) throw new ArgumentNullException(nameof(port));
-            if (blockSize <= 0 || blockSize > 512) throw new ArgumentOutOfRangeException(nameof(blockSize), "blockSize phải 1..512");
-            if (cabinetAddr < 1 || cabinetAddr > 6) throw new ArgumentOutOfRangeException(nameof(cabinetAddr), "Địa chỉ tủ 1..6");
+            _io = transport ?? throw new ArgumentNullException(nameof(transport));
+            if (blockSize <= 0 || blockSize > 512) throw new ArgumentOutOfRangeException(nameof(blockSize));
+            if (cabinetAddr < 1 || cabinetAddr > 6) throw new ArgumentOutOfRangeException(nameof(cabinetAddr));
 
-            _port = port;
             _blockSize = blockSize;
             _maxRetries = Math.Max(0, maxRetries);
             _ackTimeoutMs = Math.Max(1, ackTimeoutMs);
@@ -44,36 +42,70 @@ namespace Desktop_Firmware_Testing
             _loadAddress = loadAddress;
         }
 
-        public bool SendAsync(string filePath, CancellationToken ct)
+        // ====== Ping/Pong MCE (cmd=0x04, payload [data,0x01]) ======
+        public bool Ping(byte data, int timeoutMs, CancellationToken ct)
         {
-            if (!_port.IsOpen) throw new InvalidOperationException("SerialPort chưa mở");
+            var payload = new byte[] { data, 0x01 };
+            int tries = 0;
+            while (tries++ <= _maxRetries)
+            {
+                if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+
+                var tx = BuildFrame(FrameHeader.MCE, 0x04, payload);
+                TrySafe(_io.DiscardInBuffer);
+                Log($"-> PING TRY {tries}: {ToHex(tx)}");
+                _io.Write(tx, 0, tx.Length);
+
+                var rx = ReadFrame(FrameHeader.MCE, timeoutMs, ct);
+                if (rx == null) { Log("<- PING TIMEOUT/NO FRAME"); continue; }
+
+                Log($"<- PONG: {ToHex(rx.Value.Raw)}");
+                if (rx.Value.Cmd == 0x04 && rx.Value.Payload.Length >= 2 &&
+                    rx.Value.Payload[0] == data && rx.Value.Payload[1] == 0x01)
+                {
+                    Log("PING OK");
+                    return true;
+                }
+                Log("PONG không hợp lệ");
+            }
+            return false;
+        }
+
+        // ====== Gửi firmware với header EMC (API cũ) ======
+        public bool SendAsync(string filePath, CancellationToken ct) =>
+            SendAsyncCore(filePath, ct, FrameHeader.EMC);
+
+        // ====== Gửi firmware với header MCE ======
+        public bool SendAsyncMce(string filePath, CancellationToken ct) =>
+            SendAsyncCore(filePath, ct, FrameHeader.MCE);
+
+        private bool SendAsyncCore(string filePath, CancellationToken ct, FrameHeader header)
+        {
+            if (!_io.IsOpen) throw new InvalidOperationException("Transport chưa mở");
             if (!File.Exists(filePath)) throw new FileNotFoundException("Không tìm thấy file firmware", filePath);
 
             var fileBytes = File.ReadAllBytes(filePath);
             long total = fileBytes.LongLength;
-            if ((ulong)total > uint.MaxValue) throw new InvalidOperationException("Firmware > 4GB không được hỗ trợ (fwSize 4 bytes).");
+            if ((ulong)total > uint.MaxValue) throw new InvalidOperationException("Firmware > 4GB không hỗ trợ.");
 
-            Log($"INIT: file={Path.GetFileName(filePath)}, size={total}B, chunk={_blockSize}, addr={_cabinetAddr}, load=0x{_loadAddress:X8}");
+            Log($"[{header}] INIT: file={Path.GetFileName(filePath)}, size={total}B, chunk={_blockSize}, addr={_cabinetAddr}, load=0x{_loadAddress:X8}");
 
-            // 1) Gửi lệnh khởi tạo EMC 0xFB
-            if (!SendInitAndWaitAck((uint)total, ct))
+            if (!SendInitAndWaitAck((uint)total, ct, header))
             {
                 Log("INIT thất bại");
                 return false;
             }
 
-            // 2) Gửi các frame dữ liệu EMC 0xFC
             long sent = 0;
-            ushort frameIdx = 0; // bắt đầu từ 0
+            ushort frameIdx = 0;
             using var ms = new MemoryStream(fileBytes);
             var buf = new byte[_blockSize];
 
             int read;
             while ((read = ms.Read(buf, 0, buf.Length)) > 0)
             {
-                ct.ThrowIfCancellationRequested();
+                if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
 
-                // payload DATA = [addr, data..., frameIdx_LE]
                 var payload = new byte[1 + read + 2];
                 int p = 0;
                 payload[p++] = _cabinetAddr;
@@ -81,7 +113,7 @@ namespace Desktop_Firmware_Testing
                 p += read;
                 WriteLE16(payload, p, frameIdx);
 
-                if (!SendFrameWaitAck_Data(0xFC, payload, ct, frameIdx))
+                if (!SendFrameWaitAck_Data(0xFC, payload, ct, frameIdx, header))
                 {
                     Log($"FRAME {frameIdx} thất bại");
                     return false;
@@ -98,10 +130,9 @@ namespace Desktop_Firmware_Testing
             return true;
         }
 
-        // Gửi EMC 0xFB và chờ ACK EMC 0xFC với frameIdx==0
-        private bool SendInitAndWaitAck(uint fwSize, CancellationToken ct)
+        // INIT: 0xFB -> chờ ACK 0xFC idx=0
+        private bool SendInitAndWaitAck(uint fwSize, CancellationToken ct, FrameHeader header)
         {
-            // payload: [addr(1), loadAddr(4 LE), fwSize(4 LE), frameSize(2 LE)] => 11 bytes
             var payload = new byte[11];
             int p = 0;
             payload[p++] = _cabinetAddr;
@@ -112,116 +143,71 @@ namespace Desktop_Firmware_Testing
             int tries = 0;
             while (tries++ <= _maxRetries)
             {
-                ct.ThrowIfCancellationRequested();
+                if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
 
-                var tx = BuildFrame(0xFB, payload);
-                try { _port.DiscardInBuffer(); } catch { }
-                Log($"-> INIT TRY {tries}: {ToHex(tx)}");
-                _port.Write(tx, 0, tx.Length);
+                var tx = BuildFrame(header, 0xFB, payload);
+                TrySafe(_io.DiscardInBuffer);
+                Log($"-> [{header}] INIT TRY {tries}: {ToHex(tx)}");
+                _io.Write(tx, 0, tx.Length);
 
-                var rx = ReadEmcFrame(_ackTimeoutMs, ct);
-                if (rx == null)
-                {
-                    Log("<- INIT TIMEOUT/NO FRAME");
-                    continue;
-                }
+                var rx = ReadFrame(header, _ackTimeoutMs, ct);
+                if (rx == null) { Log("<- INIT TIMEOUT/NO FRAME"); continue; }
 
-                Log($"<- INIT RESP: {ToHex(rx.Value.Raw)}");
+                Log($"<- [{header}] INIT RESP: {ToHex(rx.Value.Raw)}");
 
                 if (rx.Value.Cmd == 0xFC && rx.Value.Payload.Length >= 3)
                 {
                     byte addr = rx.Value.Payload[0];
                     ushort idx = ReadLE16(rx.Value.Payload, rx.Value.Payload.Length - 2);
-                    if (addr == _cabinetAddr && idx == 0)
-                    {
-                        Log("ACK INIT OK (0xFC, idx=0)");
-                        return true;
-                    }
-                    Log($"ACK INIT sai (addr={addr}, idx={idx}), kỳ vọng (addr={_cabinetAddr}, idx=0)");
+                    if (addr == _cabinetAddr && idx == 0) { Log("ACK INIT OK"); return true; }
+                    Log($"ACK INIT sai (addr={addr}, idx={idx})");
                 }
-                else
-                {
-                    Log("RESP INIT không hợp lệ");
-                }
+                else Log("RESP INIT không hợp lệ");
             }
             return false;
         }
 
-        // Gửi EMC 0xFC data frame và chờ ACK EMC 0xFC với cùng frameIdx
-        private bool SendFrameWaitAck_Data(byte cmd, ReadOnlySpan<byte> payload, CancellationToken ct, ushort frameIdx)
+        // DATA: 0xFC -> chờ ACK 0xFC cùng frameIdx
+        private bool SendFrameWaitAck_Data(byte cmd, ReadOnlySpan<byte> payload, CancellationToken ct, ushort frameIdx, FrameHeader header)
         {
             int tries = 0;
             while (tries++ <= _maxRetries)
             {
-                ct.ThrowIfCancellationRequested();
+                if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
 
-                var tx = BuildFrame(cmd, payload);
-                try { _port.DiscardInBuffer(); } catch { }
+                var tx = BuildFrame(header, cmd, payload);
+                TrySafe(_io.DiscardInBuffer);
 
-                Log($"-> FRAME {frameIdx} TRY {tries}: {ToHex(tx)}");
-                _port.Write(tx, 0, tx.Length);
+                Log($"-> [{header}] FRAME {frameIdx} TRY {tries}: {ToHex(tx)}");
+                _io.Write(tx, 0, tx.Length);
 
-                var rx = ReadEmcFrame(_ackTimeoutMs, ct);
-                if (rx == null)
-                {
-                    Log("<- TIMEOUT/NO FRAME");
-                    continue;
-                }
+                var rx = ReadFrame(header, _ackTimeoutMs, ct);
+                if (rx == null) { Log("<- TIMEOUT/NO FRAME"); continue; }
 
-                Log($"<- RESP: {ToHex(rx.Value.Raw)}");
+                Log($"<- [{header}] RESP: {ToHex(rx.Value.Raw)}");
 
                 if (rx.Value.Cmd == 0xFC && rx.Value.Payload.Length >= 3)
                 {
                     byte addr = rx.Value.Payload[0];
                     ushort idx = ReadLE16(rx.Value.Payload, rx.Value.Payload.Length - 2);
-                    if (addr == _cabinetAddr && idx == frameIdx)
-                    {
-                        Log($"ACK DATA OK (addr={addr}, idx={idx})");
-                        return true;
-                    }
-                    Log($"ACK sai (addr={addr}, idx={idx}), kỳ vọng (addr={_cabinetAddr}, idx={frameIdx})");
+                    if (addr == _cabinetAddr && idx == frameIdx) { Log("ACK DATA OK"); return true; }
+                    Log($"ACK sai (addr={addr}, idx={idx})");
                 }
-                else
-                {
-                    Log("RESP không hợp lệ");
-                }
+                else Log("RESP không hợp lệ");
             }
             return false;
         }
 
-        private static byte[] BuildFrame(byte cmd, ReadOnlySpan<byte> payload)
-        {
-            int len = payload.Length;
-            byte lenL = (byte)(len & 0xFF);
-            byte lenH = (byte)((len >> 8) & 0xFF);
-            byte cks = ComputeChecksum(cmd, lenL, lenH, payload);
+        // ====== Reader/Builder theo header ======
+        private EmcFrame? ReadFrame(FrameHeader header, int timeoutMs, CancellationToken ct) =>
+            header == FrameHeader.EMC ? ReadFrameRaw(0x45, 0x4D, 0x43, timeoutMs, ct)  // 'E','M','C'
+                                      : ReadFrameRaw(0x4D, 0x43, 0x45, timeoutMs, ct); // 'M','C','E'
 
-            var frame = new byte[3 + 1 + 2 + len + 1];
-            int i = 0;
-            frame[i++] = 0x45; // 'E'
-            frame[i++] = 0x4D; // 'M'
-            frame[i++] = 0x43; // 'C'
-            frame[i++] = cmd;
-            frame[i++] = lenL;
-            frame[i++] = lenH;
-            if (len > 0)
-            {
-                payload.CopyTo(frame.AsSpan(i, len));
-                i += len;
-            }
-            frame[i] = cks;
-            return frame;
-        }
+        private static byte[] BuildFrame(FrameHeader header, byte cmd, ReadOnlySpan<byte> payload) =>
+            header == FrameHeader.EMC ? BuildFrameRaw(0x45, 0x4D, 0x43, cmd, payload)
+                                      : BuildFrameRaw(0x4D, 0x43, 0x45, cmd, payload);
 
-        private static byte ComputeChecksum(byte cmd, byte lenL, byte lenH, ReadOnlySpan<byte> payload)
-        {
-            int sum = cmd + lenL + lenH;
-            for (int i = 0; i < payload.Length; i++) sum += payload[i];
-            return (byte)(sum & 0xFF);
-        }
-
-        // Đọc 1 frame EMC hoàn chỉnh trong timeout. Trả null nếu timeout/CRC sai.
-        private EmcFrame? ReadEmcFrame(int timeoutMs, CancellationToken ct)
+        private EmcFrame? ReadFrameRaw(byte h1, byte h2, byte h3, int timeoutMs, CancellationToken ct)
         {
             long deadline = Environment.TickCount64 + timeoutMs;
 
@@ -229,34 +215,22 @@ namespace Desktop_Firmware_Testing
             {
                 while (Environment.TickCount64 < deadline)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    try
-                    {
-                        if (_port.BytesToRead > 0)
-                        {
-                            b = _port.ReadByte();
-                            return true;
-                        }
-                        Thread.Sleep(2);
-                    }
-                    catch (TimeoutException) { }
+                    if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                    if (_io.BytesToRead > 0) { b = _io.ReadByte(); if (b >= 0) return true; }
+                    else Thread.Sleep(2);
                 }
-                b = -1;
-                return false;
+                b = -1; return false;
             }
 
             int x;
 
-            // 'E'
-            while (ReadOne(out x))
-            {
-                if (x == 0x45) break;
-            }
-            if (x != 0x45) return null;
-            // 'M'
-            if (!ReadOne(out x) || x != 0x4D) return null;
-            // 'C'
-            if (!ReadOne(out x) || x != 0x43) return null;
+            // H1
+            while (ReadOne(out x)) { if (x == h1) break; }
+            if (x != h1) return null;
+            // H2
+            if (!ReadOne(out x) || x != h2) return null;
+            // H3
+            if (!ReadOne(out x) || x != h3) return null;
 
             // cmd, len
             if (!ReadOne(out x)) return null; byte cmd = (byte)x;
@@ -268,27 +242,46 @@ namespace Desktop_Firmware_Testing
             int got = 0;
             while (got < len && Environment.TickCount64 < deadline)
             {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    int n = _port.Read(payload, got, len - got);
-                    if (n > 0) got += n; else Thread.Sleep(2);
-                }
-                catch (TimeoutException) { }
+                if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                int n = _io.Read(payload, got, len - got);
+                if (n > 0) got += n; else Thread.Sleep(2);
             }
             if (got != len) return null;
 
             if (!ReadOne(out x)) return null; byte cks = (byte)x;
-
             if (ComputeChecksum(cmd, lenL, lenH, payload) != cks) return null;
 
             var raw = new byte[3 + 1 + 2 + len + 1];
-            raw[0] = 0x45; raw[1] = 0x4D; raw[2] = 0x43;
+            raw[0] = h1; raw[1] = h2; raw[2] = h3;
             raw[3] = cmd; raw[4] = lenL; raw[5] = lenH;
             if (len > 0) Buffer.BlockCopy(payload, 0, raw, 6, len);
             raw[^1] = cks;
 
             return new EmcFrame(cmd, payload, raw);
+        }
+
+        private static byte[] BuildFrameRaw(byte h1, byte h2, byte h3, byte cmd, ReadOnlySpan<byte> payload)
+        {
+            int len = payload.Length;
+            byte lenL = (byte)(len & 0xFF);
+            byte lenH = (byte)((len >> 8) & 0xFF);
+            byte cks = ComputeChecksum(cmd, lenL, lenH, payload);
+
+            var frame = new byte[3 + 1 + 2 + len + 1];
+            int i = 0;
+            frame[i++] = h1; frame[i++] = h2; frame[i++] = h3;
+            frame[i++] = cmd; frame[i++] = lenL; frame[i++] = lenH;
+            if (len > 0) { payload.CopyTo(frame.AsSpan(i, len)); i += len; }
+            frame[i] = cks;
+            return frame;
+        }
+
+        // ====== Utils ======
+        private static byte ComputeChecksum(byte cmd, byte lenL, byte lenH, ReadOnlySpan<byte> payload)
+        {
+            int sum = cmd + lenL + lenH;
+            for (int i = 0; i < payload.Length; i++) sum += payload[i];
+            return (byte)(sum & 0xFF);
         }
 
         private static void WriteLE16(byte[] buf, int offset, ushort v)
@@ -305,10 +298,8 @@ namespace Desktop_Firmware_Testing
             buf[offset + 3] = (byte)((v >> 24) & 0xFF);
         }
 
-        private static ushort ReadLE16(byte[] buf, int offset)
-        {
-            return (ushort)(buf[offset] | (buf[offset + 1] << 8));
-        }
+        private static ushort ReadLE16(byte[] buf, int offset) =>
+            (ushort)(buf[offset] | (buf[offset + 1] << 8));
 
         private static string ToHex(ReadOnlySpan<byte> data)
         {
@@ -321,6 +312,7 @@ namespace Desktop_Firmware_Testing
             return sb.ToString();
         }
 
+        private static void TrySafe(Action a) { try { a(); } catch { } }
         private void Log(string msg) => LogEmitted?.Invoke(this, msg);
 
         private readonly record struct EmcFrame(byte Cmd, byte[] Payload, byte[] Raw);

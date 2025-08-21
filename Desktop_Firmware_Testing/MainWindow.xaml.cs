@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -12,9 +13,16 @@ namespace Desktop_Firmware_Testing
 {
     public partial class MainWindow : Window
     {
-        private SerialPort? _port;
+        private SerialPort? _serial;
+        private IEmcTransport? _transport;
         private FirmwareSender? _sender;
         private CancellationTokenSource? _cts;
+
+        // cấu hình mặc định
+        private const int DefaultBlockSize = 512;
+        private const int DefaultRetries = 5;
+        private const int DefaultAckTimeoutMs = 2000;
+        private const int DefaultPingTimeoutMs = 1000;
 
         public MainWindow()
         {
@@ -22,6 +30,34 @@ namespace Desktop_Firmware_Testing
             RefreshPorts();
             TxtLog.Text = "";
             TxtConnState.Text = "Chưa kết nối";
+        }
+
+        // Gắn trong XAML: Loaded="Window_Loaded"
+        private void Window_Loaded(object sender, RoutedEventArgs e) => UpdateModeUI();
+
+        protected override void OnClosed(EventArgs e)
+        {
+            TryDisconnect();
+            base.OnClosed(e);
+        }
+
+        private void Mode_Checked(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            UpdateModeUI();
+        }
+
+        private void UpdateModeUI()
+        {
+            bool serial = RdoSerial.IsChecked == true;
+            PnlSerial.Visibility = serial ? Visibility.Visible : Visibility.Collapsed;
+            PnlTcp.Visibility = serial ? Visibility.Collapsed : Visibility.Visible;
+
+            if (_transport?.IsOpen == true) TryDisconnect();
+
+            BtnSend.IsEnabled = false;
+            TxtConnState.Text = "Chưa kết nối";
+            BtnConnect.Content = "Kết nối";
         }
 
         private void RefreshPorts()
@@ -45,17 +81,16 @@ namespace Desktop_Firmware_Testing
             if (dlg.ShowDialog() == true)
             {
                 TxtFile.Text = dlg.FileName;
-                BtnSend.IsEnabled = _port?.IsOpen == true;
+                BtnSend.IsEnabled = _transport?.IsOpen == true;
                 Log($"Chọn file: {Path.GetFileName(dlg.FileName)}");
             }
         }
 
         private void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
-            if (_port?.IsOpen == true)
+            if (_transport?.IsOpen == true)
             {
-                try { _port.Close(); } catch { }
-                _port = null;
+                TryDisconnect();
                 TxtConnState.Text = "Chưa kết nối";
                 BtnConnect.Content = "Kết nối";
                 BtnSend.IsEnabled = false;
@@ -63,21 +98,47 @@ namespace Desktop_Firmware_Testing
                 return;
             }
 
+            // địa chỉ tủ 1..6
+            byte cabinetAddr = 1;
+            if (CmbAddr.SelectedItem is ComboBoxItem addrItem &&
+                byte.TryParse(addrItem.Content?.ToString(), out var parsed) &&
+                parsed >= 1 && parsed <= 6)
+            {
+                cabinetAddr = parsed;
+            }
+
+            if (RdoSerial.IsChecked == true)
+            {
+                ConnectSerial(cabinetAddr);
+            }
+            else
+            {
+                ConnectTcp(cabinetAddr);
+            }
+        }
+
+        private void ConnectSerial(byte cabinetAddr)
+        {
             if (CmbPorts.SelectedItem is not string portName)
             {
                 MessageBox.Show("Chọn cổng COM");
                 return;
             }
-            int baud = int.Parse(((ComboBoxItem)CmbBaud.SelectedItem!).Content!.ToString()!);
+            if (CmbBaud.SelectedItem is not ComboBoxItem baudItem ||
+                !int.TryParse(baudItem.Content?.ToString(), out int baud))
+            {
+                MessageBox.Show("Baud rate không hợp lệ");
+                return;
+            }
 
-            _port = new SerialPort(portName)
+            _serial = new SerialPort(portName)
             {
                 BaudRate = baud,
                 Parity = Parity.None,
                 DataBits = 8,
                 StopBits = StopBits.One,
                 Handshake = Handshake.None,
-                ReadTimeout = 2000,
+                ReadTimeout = 200,   // chỉ để tránh block dài; không dùng làm timeout tổng
                 WriteTimeout = 2000,
                 DtrEnable = true,
                 RtsEnable = false,
@@ -86,27 +147,81 @@ namespace Desktop_Firmware_Testing
 
             try
             {
-                _port.Open();
-                _port.DiscardInBuffer();
-                _port.DiscardOutBuffer();
+                var serialTx = new SerialEmcTransport(_serial);
+                serialTx.Open();
+                _transport = serialTx;
 
-                TxtConnState.Text = $"Kết nối: {portName} @ {baud}";
+                _sender = new FirmwareSender(_transport, DefaultBlockSize, DefaultRetries, DefaultAckTimeoutMs, cabinetAddr, 0);
+                _sender.LogEmitted += (_, msg) => Dispatcher.Invoke(() => Log(msg));
+
+                // ping không dùng token timeout
+                TryFlushIo();
+                bool pingOk = _sender.Ping(0x55, DefaultPingTimeoutMs, CancellationToken.None);
+                Log($"PING {(pingOk ? "OK" : "FAIL")}");
+
+                TxtConnState.Text = $"Serial: {_serial.PortName} @ {baud}";
                 BtnConnect.Content = "Ngắt";
-                BtnSend.IsEnabled = !string.IsNullOrWhiteSpace(TxtFile.Text);
-                Log($"Kết nối {portName} thành công");
+                BtnSend.IsEnabled = pingOk && !string.IsNullOrWhiteSpace(TxtFile.Text);
+
+                if (!pingOk) Log("Thiết bị không phản hồi ping");
+                else Log($"Kết nối Serial {_serial.PortName} thành công");
             }
             catch (Exception ex)
             {
-                _port = null;
+                _transport = null;
+                TryDisconnect();
                 MessageBox.Show("Không mở được cổng: " + ex.Message);
+            }
+        }
+
+        private void ConnectTcp(byte cabinetAddr)
+        {
+            var host = TxtIp.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(host) || Uri.CheckHostName(host) == UriHostNameType.Unknown)
+            {
+                MessageBox.Show("Host/IP không hợp lệ");
+                return;
+            }
+            if (!int.TryParse(TxtTcpPort.Text, out int tcpPort) || tcpPort < 1 || tcpPort > 65535)
+            {
+                MessageBox.Show("TCP port không hợp lệ");
+                return;
+            }
+
+            try
+            {
+                // tăng recvTimeout để tránh false timeout trên TCP
+                var tcpTx = new TcpEmcTransport(host, tcpPort, recvTimeoutMs: 500, sendTimeoutMs: 2000);
+                tcpTx.Open();
+                _transport = tcpTx;
+
+                _sender = new FirmwareSender(_transport, DefaultBlockSize, DefaultRetries, DefaultAckTimeoutMs, cabinetAddr, 0);
+                _sender.LogEmitted += (_, msg) => Dispatcher.Invoke(() => Log(msg));
+
+                TryFlushIo();
+                bool pingOk = _sender.Ping(0x55, DefaultPingTimeoutMs, CancellationToken.None);
+                Log($"PING {(pingOk ? "OK" : "FAIL")}");
+
+                TxtConnState.Text = $"TCP: {host}:{tcpPort}";
+                BtnConnect.Content = "Ngắt";
+                BtnSend.IsEnabled = pingOk && !string.IsNullOrWhiteSpace(TxtFile.Text);
+
+                if (!pingOk) Log("Thiết bị không phản hồi ping");
+                else Log($"Kết nối TCP {host}:{tcpPort} thành công");
+            }
+            catch (Exception ex)
+            {
+                _transport = null;
+                TryDisconnect();
+                MessageBox.Show("Không kết nối TCP được: " + ex.Message);
             }
         }
 
         private async void BtnSend_Click(object sender, RoutedEventArgs e)
         {
-            if (_port == null || !_port.IsOpen)
+            if (_transport == null || !_transport.IsOpen)
             {
-                MessageBox.Show("Chưa kết nối COM");
+                MessageBox.Show("Chưa kết nối");
                 return;
             }
 
@@ -117,7 +232,6 @@ namespace Desktop_Firmware_Testing
                 return;
             }
 
-            // Lấy địa chỉ tủ từ ComboBox (1..6)
             if (CmbAddr.SelectedItem is not ComboBoxItem addrItem ||
                 !byte.TryParse(addrItem.Content?.ToString(), out var cabinetAddr) ||
                 cabinetAddr < 1 || cabinetAddr > 6)
@@ -126,9 +240,6 @@ namespace Desktop_Firmware_Testing
                 return;
             }
 
-            // Kích thước frame tối đa 512 theo giao thức
-            ushort chunk = 512;
-
             BtnSend.IsEnabled = false;
             BtnCancel.IsEnabled = true;
             Prog.Value = 0;
@@ -136,29 +247,39 @@ namespace Desktop_Firmware_Testing
             _cts = new CancellationTokenSource();
 
             _sender = new FirmwareSender(
-                _port,
-                blockSize: chunk,
-                maxRetries: 5,
-                ackTimeoutMs: 2000,
+                transport: _transport,
+                blockSize: DefaultBlockSize,
+                maxRetries: DefaultRetries,
+                ackTimeoutMs: DefaultAckTimeoutMs,
                 cabinetAddr: cabinetAddr,
-                loadAddress: 0 // 4 bytes, có thể thay đổi nếu cần
+                loadAddress: 0
             );
 
-            _sender.LogEmitted += (_, msg) => Dispatcher.Invoke(() => Log(msg));
+            _sender.LogEmitted += (_, m) => Dispatcher.Invoke(() => Log(m));
             _sender.ProgressChanged += (_, p) => Dispatcher.Invoke(() =>
             {
                 Prog.Value = p.Percent;
                 TxtProgress.Text = $"{p.Percent:0}% ({p.SentBytes}/{p.TotalBytes} bytes)";
             });
 
+            // pre-ping không dùng token timeout
+            if (!_sender.Ping(0x55, DefaultPingTimeoutMs, CancellationToken.None))
+            {
+                Log("Thiết bị không phản hồi PING. Huỷ gửi.");
+                BtnCancel.IsEnabled = false;
+                BtnSend.IsEnabled = _transport.IsOpen && !string.IsNullOrWhiteSpace(TxtFile.Text);
+                return;
+            }
+            Log("PING OK. Bắt đầu gửi firmware.");
+
             try
             {
-                var ok = await Task.Run(() => _sender.SendAsync(filePath, _cts.Token));
-                Log(ok ? "Hoàn tất" : "Thất bại");
+                var ok = await Task.Run(() => _sender.SendAsyncMce(filePath, _cts.Token));
+                Log(ok ? "Hoàn tất gửi firmware." : "Gửi firmware thất bại.");
             }
             catch (OperationCanceledException)
             {
-                Log("Đã huỷ theo yêu cầu");
+                Log("Đã huỷ theo yêu cầu.");
             }
             catch (Exception ex)
             {
@@ -167,16 +288,42 @@ namespace Desktop_Firmware_Testing
             finally
             {
                 BtnCancel.IsEnabled = false;
-                BtnSend.IsEnabled = true;
+                BtnSend.IsEnabled = _transport.IsOpen;
             }
         }
 
-        private void BtnCancel_Click(object sender, RoutedEventArgs e) => _cts?.Cancel();
+        private void BtnCancel_Click(object sender, RoutedEventArgs e)
+        {
+            try { _cts?.Cancel(); } catch { }
+        }
 
         private void Log(string msg)
         {
-            TxtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}\n");
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => Log(msg));
+                return;
+            }
+
+            TxtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {msg}{Environment.NewLine}");
+            TxtLog.CaretIndex = TxtLog.Text.Length;
             TxtLog.ScrollToEnd();
+        }
+
+        private void TryFlushIo()
+        {
+            try { _transport?.DiscardInBuffer(); } catch { }
+            try { _transport?.DiscardOutBuffer(); } catch { }
+        }
+
+        private void TryDisconnect()
+        {
+            try { _cts?.Cancel(); _cts?.Dispose(); } catch { }
+            _cts = null;
+            try { _transport?.Close(); } catch { }
+            _transport = null;
+            try { _serial?.Close(); _serial?.Dispose(); } catch { }
+            _serial = null;
         }
     }
 }

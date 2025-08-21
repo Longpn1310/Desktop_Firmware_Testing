@@ -3,38 +3,35 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:Desktop_Firmware_Testing"
         mc:Ignorable="d"
-        Title="Firmware Uploader" Height="450" Width="800"
-        WindowStartupLocation="CenterScreen">
+        Title="Firmware Uploader" Height="560" Width="960"
+        WindowStartupLocation="CenterScreen"
+        Loaded="Window_Loaded">
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <!-- 0: Mode + Addr + Header + Connect -->
             <RowDefinition Height="Auto"/>
+            <!-- 1: Serial panel -->
             <RowDefinition Height="Auto"/>
+            <!-- 2: TCP panel -->
             <RowDefinition Height="Auto"/>
+            <!-- 3: File picker -->
+            <RowDefinition Height="Auto"/>
+            <!-- 4: Send -->
+            <RowDefinition Height="Auto"/>
+            <!-- 5: Log label -->
             <RowDefinition Height="*"/>
+            <!-- 6: Log -->
             <RowDefinition Height="Auto"/>
+            <!-- 7: Note -->
         </Grid.RowDefinitions>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="*"/>
-        </Grid.ColumnDefinitions>
 
-        <!-- Cổng COM + Baud + Địa chỉ tủ -->
-        <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,12" VerticalAlignment="Center">
-            <TextBlock Text="Cổng:" Margin="0,0,8,0" VerticalAlignment="Center"/>
-            <ComboBox x:Name="CmbPorts" Width="160" Margin="0,0,8,0"/>
-            <Button Content="Làm mới" Width="90" Click="RefreshPorts_Click" Margin="0,0,16,0"/>
-            <TextBlock Text="Baud:" Margin="0,0,8,0" VerticalAlignment="Center"/>
-            <ComboBox x:Name="CmbBaud" Width="120" Margin="0,0,16,0">
-                <ComboBoxItem Content="115200" IsSelected="True"/>
-                <ComboBoxItem Content="921600"/>
-                <ComboBoxItem Content="460800"/>
-                <ComboBoxItem Content="230400"/>
-                <ComboBoxItem Content="57600"/>
-                <ComboBoxItem Content="38400"/>
-            </ComboBox>
+        <!-- Mode + Addr + Header + Connect -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,12">
+            <TextBlock Text="Kết nối qua:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <RadioButton x:Name="RdoSerial" Content="Serial" IsChecked="True" Checked="Mode_Checked" Margin="0,0,8,0"/>
+            <RadioButton x:Name="RdoTcp" Content="TCP/IP" Checked="Mode_Checked" Margin="0,0,16,0"/>
 
             <TextBlock Text="Địa chỉ tủ:" Margin="0,0,8,0" VerticalAlignment="Center"/>
             <ComboBox x:Name="CmbAddr" Width="80" Margin="0,0,16,0">
@@ -46,37 +43,73 @@
                 <ComboBoxItem Content="6"/>
             </ComboBox>
 
-            <Button x:Name="BtnConnect" Content="Kết nối" Width="100" Click="BtnConnect_Click"/>
+            <TextBlock Text="Header:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbHeader" Width="100" Margin="0,0,16,0">
+                <ComboBoxItem Content="EMC" IsSelected="True"/>
+                <ComboBoxItem Content="MCE"/>
+            </ComboBox>
+
+            <Button x:Name="BtnConnect" Content="Kết nối" Width="110" Click="BtnConnect_Click"/>
             <TextBlock x:Name="TxtConnState" Margin="12,0,0,0" VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- Chọn file .bin -->
-        <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,12">
-            <TextBox x:Name="TxtFile" Width="520" IsReadOnly="True" Margin="0,0,8,0"/>
+        <!-- Serial Panel -->
+        <StackPanel x:Name="PnlSerial" Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
+            <TextBlock Text="Cổng:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbPorts" Width="180" Margin="0,0,8,0"/>
+            <Button Content="Làm mới" Width="90" Click="RefreshPorts_Click" Margin="0,0,16,0"/>
+            <TextBlock Text="Baud:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbBaud" Width="140">
+                <ComboBoxItem Content="115200" IsSelected="True"/>
+                <ComboBoxItem Content="921600"/>
+                <ComboBoxItem Content="460800"/>
+                <ComboBoxItem Content="230400"/>
+                <ComboBoxItem Content="57600"/>
+                <ComboBoxItem Content="38400"/>
+                <ComboBoxItem Content="19200"/>
+                <ComboBoxItem Content="9600"/>
+            </ComboBox>
+        </StackPanel>
+
+        <!-- TCP Panel -->
+        <StackPanel x:Name="PnlTcp" Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,12" Visibility="Collapsed">
+            <TextBlock Text="IP:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <TextBox x:Name="TxtIp" Width="180" Text="192.168.1.100" Margin="0,0,16,0"/>
+            <TextBlock Text="Port:" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <TextBox x:Name="TxtTcpPort" Width="100" Text="5500"/>
+        </StackPanel>
+
+        <!-- File picker -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,12">
+            <TextBox x:Name="TxtFile" Width="620" IsReadOnly="True" Margin="0,0,8,0"/>
             <Button x:Name="BtnPickBin" Content="Chọn .bin..." Width="120" Click="PickFile_Click"/>
         </StackPanel>
 
-        <!-- Gửi -->
-        <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,12">
-            <Button x:Name="BtnSend" Content="Gửi firmware" Width="140" Click="BtnSend_Click" IsEnabled="False"/>
+        <!-- Send -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,12">
+            <Button x:Name="BtnSend" Content="Gửi firmware" Width="160" Click="BtnSend_Click" IsEnabled="False"/>
             <Button x:Name="BtnCancel" Content="Huỷ" Width="100" Margin="8,0,0,0" Click="BtnCancel_Click" IsEnabled="False"/>
-            <ProgressBar x:Name="Prog" Height="20" Margin="16,0,0,0" VerticalAlignment="Center" Width="350"/>
+            <ProgressBar x:Name="Prog" Height="20" Margin="16,0,0,0" VerticalAlignment="Center" Width="420"/>
             <TextBlock x:Name="TxtProgress" Margin="8,0,0,0" VerticalAlignment="Center"/>
         </StackPanel>
 
+        <!-- Log label -->
+        <TextBlock Grid.Row="5" Text="Log:" Margin="0,0,0,6"/>
+
         <!-- Log -->
-        <TextBlock Grid.Row="3" Grid.ColumnSpan="2" Text="Log:" Margin="0,0,0,6"/>
-        <TextBox Grid.Row="4" Grid.ColumnSpan="2" x:Name="TxtLog"
+        <TextBox Grid.Row="6" x:Name="TxtLog"
                  IsReadOnly="True"
                  AcceptsReturn="True"
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
-                 TextWrapping="NoWrap"/>
+                 TextWrapping="NoWrap"
+                 FontFamily="Consolas"
+                 FontSize="12"/>
 
-        <!-- Ghi chú -->
-        <Border Grid.Row="5" Grid.ColumnSpan="2" Padding="8" Margin="0,12,0,0" BorderBrush="#DDD" BorderThickness="1">
+        <!-- Note -->
+        <Border Grid.Row="7" Padding="8" Margin="0,12,0,0" BorderBrush="#DDD" BorderThickness="1">
             <TextBlock>
-                <Run Text="Khung EMC: ['E','M','C', CMD, len_L, len_H, payload..., cks]  cks=(CMD+lenL+lenH+sum(payload));"/>
+                <Run Text="Firmware EMC/MCE: INIT(0xFB) + DATA(0xFC). Ping/Pong MCE: cmd 0x04, payload [data,0x01]."/>
             </TextBlock>
         </Border>
     </Grid>
