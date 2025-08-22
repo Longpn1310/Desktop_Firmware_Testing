@@ -1,8 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Desktop_Firmware_Testing
 {
@@ -14,7 +10,7 @@ namespace Desktop_Firmware_Testing
         void Close();
         void DiscardInBuffer();
         void DiscardOutBuffer();
-        int Read(byte[] buffer, int offset, int count);   
+        int Read(byte[] buffer, int offset, int count);
         int ReadByte();
         void Write(byte[] buffer, int offset, int count);
     }

@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Ports;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -174,14 +175,13 @@ namespace Desktop_Firmware_Testing
             }
         }
 
+        // Thay thế method ConnectTcp trong MainWindow.cs với code sau:
+
         private void ConnectTcp(byte cabinetAddr)
         {
             var host = TxtIp.Text?.Trim();
-            if (string.IsNullOrWhiteSpace(host) || Uri.CheckHostName(host) == UriHostNameType.Unknown)
-            {
-                MessageBox.Show("Host/IP không hợp lệ");
-                return;
-            }
+
+            // Kiểm tra port
             if (!int.TryParse(TxtTcpPort.Text, out int tcpPort) || tcpPort < 1 || tcpPort > 65535)
             {
                 MessageBox.Show("TCP port không hợp lệ");
@@ -190,32 +190,212 @@ namespace Desktop_Firmware_Testing
 
             try
             {
-                // tăng recvTimeout để tránh false timeout trên TCP
-                var tcpTx = new TcpEmcTransport(host, tcpPort, recvTimeoutMs: 500, sendTimeoutMs: 2000);
-                tcpTx.Open();
+                // Xác định mode dựa vào input
+                bool isServerMode = false;
+                string displayMode = "Client";
+
+                // Nếu host trống hoặc là các giá trị đặc biệt -> Server mode
+                if (string.IsNullOrWhiteSpace(host) ||
+                    host.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
+                    host.Equals("*", StringComparison.OrdinalIgnoreCase) ||
+                    host.Equals("Any", StringComparison.OrdinalIgnoreCase) ||
+                    host.Equals("Server", StringComparison.OrdinalIgnoreCase))
+                {
+                    host = "0.0.0.0";  // Force server mode
+                    isServerMode = true;
+                    displayMode = "Server";
+                    Log($"Starting TCP Server on port {tcpPort}, waiting for client connection...");
+                }
+                else if (host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+                         host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Hỏi người dùng muốn mode nào
+                    var result = MessageBox.Show(
+                        "Bạn muốn chạy ở chế độ nào?\n\n" +
+                        "YES = TCP Server (thiết bị kết nối vào)\n" +
+                        "NO = TCP Client (kết nối đến localhost)\n\n" +
+                        "Nếu bạn đang test với thiết bị firmware, chọn YES.",
+                        "Chọn chế độ TCP",
+                        MessageBoxButton.YesNoCancel,
+                        MessageBoxImage.Question);
+
+                    if (result == MessageBoxResult.Cancel)
+                    {
+                        return;
+                    }
+                    else if (result == MessageBoxResult.Yes)
+                    {
+                        host = "0.0.0.0";  // Server mode
+                        isServerMode = true;
+                        displayMode = "Server";
+                        Log($"Starting TCP Server on port {tcpPort}...");
+                    }
+                    else
+                    {
+                        // Keep as localhost for client mode
+                        Log($"Connecting to TCP Server at {host}:{tcpPort}...");
+                    }
+                }
+                else
+                {
+                    // Client mode với IP cụ thể
+                    Log($"Connecting to TCP Server at {host}:{tcpPort}...");
+                }
+
+                // Tạo transport với timeout phù hợp
+                var tcpTx = new TcpEmcTransport(
+                    host: host,
+                    port: tcpPort,
+                    recvTimeoutMs: 2000,
+                    sendTimeoutMs: 2000,
+                    connectTimeoutMs: 10000 // Server chờ lâu hơn
+                );
+
+                // Thông báo cho user biết đang làm gì
+                if (isServerMode)
+                {
+                    Log("TCP Server đang khởi động...");
+                    Log($"Đang lắng nghe trên port {tcpPort}");
+                    Log("Chờ thiết bị kết nối (timeout 30 giây)...");
+
+                    // Có thể hiển thị IP máy để user biết
+                    string localIP = GetLocalIPAddress();
+                    if (!string.IsNullOrEmpty(localIP))
+                    {
+                        Log($"Thiết bị có thể kết nối đến: {localIP}:{tcpPort}");
+                    }
+                }
+                try
+                {
+                    tcpTx.Open();
+                }
+                catch (Exception ex)
+                {
+
+                    throw;
+                }
+                // Mở kết nối
+              
                 _transport = tcpTx;
 
+                // Khởi tạo sender
                 _sender = new FirmwareSender(_transport, DefaultBlockSize, DefaultRetries, DefaultAckTimeoutMs, cabinetAddr, 0);
                 _sender.LogEmitted += (_, msg) => Dispatcher.Invoke(() => Log(msg));
 
                 TryFlushIo();
-                bool pingOk = _sender.Ping(0x55, DefaultPingTimeoutMs, CancellationToken.None);
-                Log($"PING {(pingOk ? "OK" : "FAIL")}");
+                Thread.Sleep(50);  // Cho thiết bị thở
 
-                TxtConnState.Text = $"TCP: {host}:{tcpPort}";
+                // Test ping
+                bool pingOk = false;
+                try
+                {
+                    Log("Testing connection with PING...");
+                    pingOk = _sender.Ping(0x55, DefaultPingTimeoutMs, CancellationToken.None);
+                    Log($"PING {(pingOk ? "OK" : "FAIL")}");
+                }
+                catch (Exception pingEx)
+                {
+                    Log($"PING error: {pingEx.Message}");
+                }
+
+                // Cập nhật UI
+                if (isServerMode)
+                {
+                    TxtConnState.Text = $"TCP Server: Port {tcpPort} (Connected)";
+                    Log($"TCP Server ready, client connected from remote");
+                }
+                else
+                {
+                    TxtConnState.Text = $"TCP Client: {host}:{tcpPort}";
+                    Log($"Connected to TCP server at {host}:{tcpPort}");
+                }
+
                 BtnConnect.Content = "Ngắt";
                 BtnSend.IsEnabled = pingOk && !string.IsNullOrWhiteSpace(TxtFile.Text);
 
-                if (!pingOk) Log("Thiết bị không phản hồi ping");
-                else Log($"Kết nối TCP {host}:{tcpPort} thành công");
+                if (!pingOk)
+                {
+                    Log("⚠️ Thiết bị không phản hồi PING");
+                    Log("Kiểm tra:");
+                    Log("  1. Thiết bị đã kết nối chưa?");
+                    Log("  2. Firmware thiết bị có hỗ trợ lệnh PING không?");
+                    Log("  3. Baudrate/cấu hình có đúng không?");
+                }
+                else
+                {
+                    Log("✓ Kết nối thành công và thiết bị phản hồi PING");
+                }
+            }
+            catch (TimeoutException tex)
+            {
+                _transport = null;
+                TryDisconnect();
+
+                string message = "Timeout kết nối: " + tex.Message;
+                if (host == "0.0.0.0")
+                {
+                    message += "\n\nKhông có thiết bị nào kết nối trong 30 giây.\n" +
+                              "Kiểm tra:\n" +
+                              "1. Thiết bị đã được cấu hình đúng IP và port chưa?\n" +
+                              "2. Firewall có chặn port " + tcpPort + " không?\n" +
+                              "3. Thiết bị và máy tính có cùng mạng không?";
+                }
+                MessageBox.Show(message, "Timeout", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            catch (SocketException sex)
+            {
+                _transport = null;
+                TryDisconnect();
+
+                string message = $"Lỗi socket ({sex.SocketErrorCode}): {sex.Message}";
+
+                if (sex.SocketErrorCode == SocketError.ConnectionRefused)
+                {
+                    message += "\n\nKết nối bị từ chối. ";
+                    if (host != "0.0.0.0")
+                    {
+                        message += "Kiểm tra:\n" +
+                                  "1. Server có đang chạy không?\n" +
+                                  "2. IP và port có đúng không?\n" +
+                                  "3. Firewall có chặn không?\n\n" +
+                                  "Mẹo: Nếu muốn app này làm Server, dùng IP: 0.0.0.0";
+                    }
+                }
+                else if (sex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+                {
+                    message += $"\n\nPort {tcpPort} đã được sử dụng bởi chương trình khác.\n" +
+                              "Hãy chọn port khác hoặc tắt chương trình đang dùng port này.";
+                }
+
+                MessageBox.Show(message, "Lỗi Socket", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             catch (Exception ex)
             {
                 _transport = null;
                 TryDisconnect();
-                MessageBox.Show("Không kết nối TCP được: " + ex.Message);
+                MessageBox.Show($"Lỗi không xác định: {ex.Message}", "Lỗi", MessageBoxButton.OK, MessageBoxImage.Error);
+                Log($"Exception: {ex}");
             }
         }
+
+        // Helper method để lấy IP máy local
+        private string GetLocalIPAddress()
+        {
+            try
+            {
+                var host = System.Net.Dns.GetHostEntry(System.Net.Dns.GetHostName());
+                foreach (var ip in host.AddressList)
+                {
+                    if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    {
+                        return ip.ToString();
+                    }
+                }
+            }
+            catch { }
+            return "";
+        }
+
 
         private async void BtnSend_Click(object sender, RoutedEventArgs e)
         {
